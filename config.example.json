@@ -1,0 +1,47 @@
+{
+  "lights": [
+    {
+      "name": "Main Key Light",
+      "ip": "192.168.1.100",
+      "enabled": true,
+      "brightness": 100,
+      "temperature": 200
+    },
+    {
+      "name": "Fill Light",
+      "ip": "192.168.1.101",
+      "enabled": true,
+      "brightness": 60,
+      "temperature": 180
+    }
+  ],
+  "settings": {
+    "check_interval": 2.0,
+    "turn_on_delay": 0.5,
+    "turn_off_delay": 2.0,
+    "auto_discovery": true,
+    "notifications": true
+  },
+  "profiles": {
+    "Zoom": {
+      "brightness": 100,
+      "temperature": 200,
+      "comment": "Full brightness, neutral white for video calls"
+    },
+    "FaceTime": {
+      "brightness": 90,
+      "temperature": 180,
+      "comment": "Slightly cooler for FaceTime"
+    },
+    "Photo Booth": {
+      "brightness": 100,
+      "temperature": 220,
+      "comment": "Warmer light for photos"
+    },
+    "default": {
+      "brightness": 100,
+      "temperature": 200,
+      "comment": "Default settings for unknown apps"
+    }
+  }
+}

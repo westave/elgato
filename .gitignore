@@ -1,3 +1,6 @@
+# Local configuration (don't commit personal IPs)
+config.json
+
 # Xcode
 .DS_Store
 build/
