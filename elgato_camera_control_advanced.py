@@ -138,15 +138,65 @@ class ElgatoDiscovery(ServiceListener):
 class CameraMonitor:
     """Мониторинг состояния камеры на macOS"""
 
+    # Бинарник собирается install.sh из Tools/camera-state.swift и опрашивает
+    # CoreMediaIO (kCMIODevicePropertyDeviceIsRunningSomewhere) — тот же
+    # сигнал, что и зелёный индикатор камеры. Работает на Intel и Apple
+    # Silicon, в отличие от эвристики по lsof.
+    HELPER_PATH = Path(__file__).resolve().parent / '.build' / 'camera-state'
+
     def __init__(self):
         self.last_state = False
         self.active_app = None
+
+        helper = self.HELPER_PATH
+        if helper.is_file() and os.access(helper, os.X_OK):
+            self.helper: Optional[str] = str(helper)
+            print("📷 Определение камеры: CoreMediaIO helper (надёжный режим)")
+        else:
+            self.helper = None
+            print("📷 Определение камеры: lsof (ненадёжно на новых macOS!)")
+            print("   Запустите ./install.sh чтобы собрать CoreMediaIO helper")
 
     def is_camera_active(self) -> Tuple[bool, Optional[str]]:
         """
         Проверить, активна ли камера и какое приложение её использует
         Возвращает (is_active, app_name)
         """
+        if self.helper:
+            state = self._check_via_helper()
+            if state is not None:
+                app_name = self._detect_app() if state else None
+                return state, app_name
+
+        return self._check_via_lsof()
+
+    def _check_via_helper(self) -> Optional[bool]:
+        """Проверка через CoreMediaIO helper. None = helper не сработал."""
+        try:
+            result = subprocess.run(
+                [self.helper],
+                capture_output=True,
+                timeout=5
+            )
+            if result.returncode == 0:
+                return True
+            if result.returncode == 1:
+                return False
+        except Exception as e:
+            print(f"⚠️  camera-state helper error: {e}")
+        return None
+
+    def _detect_app(self) -> Optional[str]:
+        """Определить приложение, использующее камеру (best-effort, через lsof)"""
+        # Пока камера остаётся активной, не пересканируем lsof каждый цикл
+        if self.last_state and self.active_app:
+            return self.active_app
+
+        _, app_name = self._check_via_lsof()
+        return app_name
+
+    def _check_via_lsof(self) -> Tuple[bool, Optional[str]]:
+        """Старый метод определения камеры по процессам (fallback)"""
         try:
             result = subprocess.run(
                 ['lsof', '-w'],
@@ -202,9 +252,9 @@ class CameraMonitor:
         current_state, app_name = self.is_camera_active()
         has_changed = current_state != self.last_state
 
+        self.active_app = app_name if current_state else None
         if has_changed:
             self.last_state = current_state
-            self.active_app = app_name
 
         return current_state, has_changed, app_name
 
@@ -443,10 +493,18 @@ class ElgatoCameraControl:
             )
             self.turn_off_timer.start()
 
-    def run(self):
-        """Запустить мониторинг"""
-        if not self.setup():
-            return
+    def run(self, daemon: bool = False):
+        """Запустить мониторинг.
+
+        daemon=True (запуск из launchd): не завершаться, если устройства
+        ещё не найдены (сеть могла не подняться после логина/сна), а
+        повторять поиск каждые 30 секунд.
+        """
+        while not self.setup():
+            if not daemon:
+                return
+            print("⏳ Устройства не найдены, повторный поиск через 30с...")
+            time.sleep(30)
 
         print("\n🚀 Мониторинг камеры начат...")
         print("   (Нажмите Ctrl+C для выхода)\n")
@@ -499,6 +557,11 @@ def main():
         action='store_true',
         help='Create example config.json and exit'
     )
+    parser.add_argument(
+        '--daemon',
+        action='store_true',
+        help='Run as launchd daemon: retry discovery instead of exiting when no devices found'
+    )
 
     args = parser.parse_args()
 
@@ -540,7 +603,7 @@ def main():
 
     # Запустить приложение
     controller = ElgatoCameraControl(args.config)
-    controller.run()
+    controller.run(daemon=args.daemon)
 
 
 if __name__ == "__main__":
