@@ -28,25 +28,55 @@ class ElgatoDevice:
         self.port = 9123
         self.base_url = f"http://{ip}:{self.port}/elgato/lights"
         self.is_on = False
+        # Состояние лампы, запомненное перед выключением, — чтобы включать
+        # ровно с теми же яркостью/температурой
+        self.last_brightness: Optional[int] = None
+        self.last_temperature: Optional[int] = None
 
     def turn_on(self, brightness: Optional[int] = None, temperature: Optional[int] = None) -> bool:
         """Включить свет.
 
-        Без параметров отправляется только "on" — лампа сохраняет свои
-        последние яркость/температуру (например, выставленные из Home App
-        или Elgato Control Center).
+        Без параметров восстанавливается состояние, запомненное перед
+        последним выключением (или, если его нет, лампа включается со
+        своими текущими настройками).
         """
+        if brightness is None and temperature is None:
+            brightness = self.last_brightness
+            temperature = self.last_temperature
+
         if self._set_state(True, brightness, temperature):
             self.is_on = True
             return True
         return False
 
     def turn_off(self) -> bool:
-        """Выключить свет"""
+        """Выключить свет, запомнив текущие яркость/температуру"""
+        self._remember_state()
         if self._set_state(False):
             self.is_on = False
             return True
         return False
+
+    def _remember_state(self):
+        """Сохранить текущие яркость/температуру лампы"""
+        state = self.get_state()
+        if state:
+            if 'brightness' in state:
+                self.last_brightness = int(state['brightness'])
+            if 'temperature' in state:
+                self.last_temperature = int(state['temperature'])
+
+    def get_state(self) -> Optional[Dict]:
+        """Получить текущее состояние лампы (on/brightness/temperature)"""
+        try:
+            response = requests.get(self.base_url, timeout=3)
+            if response.status_code == 200:
+                lights = response.json().get('lights') or []
+                if lights:
+                    return lights[0]
+        except requests.exceptions.RequestException:
+            pass
+        return None
 
     def _set_state(self, on: bool, brightness: Optional[int] = None,
                    temperature: Optional[int] = None) -> bool:
@@ -147,9 +177,13 @@ class CameraMonitor:
     # Silicon, в отличие от эвристики по lsof.
     HELPER_PATH = Path(__file__).resolve().parent / '.build' / 'camera-state'
 
-    def __init__(self):
+    def __init__(self, detect_apps: bool = False):
         self.last_state = False
         self.active_app = None
+        # Определение приложения требует полного скана lsof (до 5-8 секунд
+        # на нагруженном Mac) — включаем только если реально используются
+        # профили приложений, иначе это лишняя задержка включения света
+        self.detect_apps = detect_apps
 
         helper = self.HELPER_PATH
         if helper.is_file() and os.access(helper, os.X_OK):
@@ -168,7 +202,9 @@ class CameraMonitor:
         if self.helper:
             state = self._check_via_helper()
             if state is not None:
-                app_name = self._detect_app() if state else None
+                app_name = None
+                if state and self.detect_apps:
+                    app_name = self._detect_app()
                 return state, app_name
 
         return self._check_via_lsof()
@@ -268,11 +304,12 @@ class Config:
     DEFAULT_CONFIG = {
         "lights": [],
         "settings": {
-            "check_interval": 2.0,
-            "turn_on_delay": 0.5,
+            "check_interval": 0.5,
+            "turn_on_delay": 0.0,
             "turn_off_delay": 2.0,
             "auto_discovery": True,
-            "notifications": True
+            "notifications": True,
+            "apply_profiles": False
         },
         "profiles": {
             "default": {
@@ -367,7 +404,9 @@ class ElgatoCameraControl:
     def __init__(self, config_path: Optional[str] = None):
         self.config = Config(config_path)
         self.devices: List[ElgatoDevice] = []
-        self.camera = CameraMonitor()
+        self.camera = CameraMonitor(
+            detect_apps=self.config.data['settings'].get('apply_profiles', False)
+        )
         self.running = False
         self.turn_on_timer = None
         self.turn_off_timer = None
@@ -483,15 +522,17 @@ class ElgatoCameraControl:
             self.turn_off_timer.cancel()
 
         if is_active:
-            # Включить с задержкой
             delay = settings['turn_on_delay']
-            print(f"📹 Камера АКТИВНА (задержка {delay}с)...")
-
-            self.turn_on_timer = threading.Timer(
-                delay,
-                lambda: self.turn_lights_on(app_name)
-            )
-            self.turn_on_timer.start()
+            if delay <= 0:
+                print("📹 Камера АКТИВНА")
+                self.turn_lights_on(app_name)
+            else:
+                print(f"📹 Камера АКТИВНА (задержка {delay}с)...")
+                self.turn_on_timer = threading.Timer(
+                    delay,
+                    lambda: self.turn_lights_on(app_name)
+                )
+                self.turn_on_timer.start()
         else:
             # Выключить с задержкой
             delay = settings['turn_off_delay']
