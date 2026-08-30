@@ -69,7 +69,8 @@ if [[ ! -f "$SCRIPT_DIR/config.json" ]]; then
     "turn_on_delay": 0.5,
     "turn_off_delay": 2.0,
     "auto_discovery": true,
-    "notifications": true
+    "notifications": true,
+    "apply_profiles": false
   },
   "profiles": {
     "default": {

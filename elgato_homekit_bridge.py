@@ -11,6 +11,7 @@ Elgato Key Light → HomeKit Bridge
          отсканировать" → Elgato Bridge → код 031-45-154
 """
 
+import asyncio
 import json
 import os
 import signal
@@ -137,6 +138,25 @@ def wait_for_lights(config: Config) -> list:
             time.sleep(30)
 
 
+def run_driver(driver: AccessoryDriver) -> None:
+    """Запуск event loop без driver.start().
+
+    driver.start() в HAP-python (вплоть до 5.0.0) вызывает
+    asyncio.SafeChildWatcher, который удалён в Python 3.14 — на нём мост
+    падал на старте. Здесь то же самое, что делает start(), но без
+    child watcher (дочерние процессы мост не запускает).
+    """
+    loop = driver.loop
+    try:
+        driver.add_job(driver.async_start())
+        loop.run_forever()
+    except KeyboardInterrupt:
+        loop.call_soon_threadsafe(loop.create_task, driver.async_stop())
+        loop.run_forever()
+    finally:
+        loop.close()
+
+
 def main():
     print("🏠 Elgato Key Light → HomeKit Bridge")
     print("=" * 60)
@@ -167,7 +187,7 @@ def main():
     print(f"   4. Код: {PINCODE.decode()}")
     print()
 
-    driver.start()
+    run_driver(driver)
 
 
 if __name__ == "__main__":

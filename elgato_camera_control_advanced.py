@@ -30,11 +30,13 @@ class ElgatoDevice:
         self.is_on = False
 
     def turn_on(self, brightness: Optional[int] = None, temperature: Optional[int] = None) -> bool:
-        """Включить свет с указанными параметрами"""
-        b = brightness if brightness is not None else self.brightness
-        t = temperature if temperature is not None else self.temperature
+        """Включить свет.
 
-        if self._set_state(True, b, t):
+        Без параметров отправляется только "on" — лампа сохраняет свои
+        последние яркость/температуру (например, выставленные из Home App
+        или Elgato Control Center).
+        """
+        if self._set_state(True, brightness, temperature):
             self.is_on = True
             return True
         return False
@@ -46,20 +48,21 @@ class ElgatoDevice:
             return True
         return False
 
-    def _set_state(self, on: bool, brightness: int = 100, temperature: int = 200) -> bool:
-        """Установить состояние света"""
+    def _set_state(self, on: bool, brightness: Optional[int] = None,
+                   temperature: Optional[int] = None) -> bool:
+        """Установить состояние света; None-параметры не отправляются"""
         if not self.enabled:
             return False
 
+        light: Dict[str, int] = {"on": 1 if on else 0}
+        if brightness is not None:
+            light["brightness"] = brightness
+        if temperature is not None:
+            light["temperature"] = temperature
+
         payload = {
             "numberOfLights": 1,
-            "lights": [
-                {
-                    "on": 1 if on else 0,
-                    "brightness": brightness,
-                    "temperature": temperature
-                }
-            ]
+            "lights": [light]
         }
 
         try:
@@ -429,16 +432,23 @@ class ElgatoCameraControl:
         return True
 
     def turn_lights_on(self, app_name: Optional[str]):
-        """Включить все светы с учетом профиля"""
-        profile = self.config.get_profile(app_name)
-
+        """Включить все светы (с профилем, если включено apply_profiles)"""
         app_str = f" ({app_name})" if app_name else ""
         print(f"💡 Включаю свет{app_str}...")
-        print(f"   Профиль: {profile['brightness']}% яркость, {profile['temperature']} температура")
+
+        # По умолчанию профили выключены: лампа включается с последними
+        # своими настройками яркости/температуры, не затирая их.
+        if self.config.data['settings'].get('apply_profiles', False):
+            profile = self.config.get_profile(app_name)
+            brightness, temperature = profile['brightness'], profile['temperature']
+            print(f"   Профиль: {brightness}% яркость, {temperature} температура")
+        else:
+            brightness = temperature = None
+            print("   Восстанавливаю последнее состояние лампы")
 
         for device in self.devices:
             if device.enabled:
-                device.turn_on(profile['brightness'], profile['temperature'])
+                device.turn_on(brightness, temperature)
                 print(f"   ✅ {device.name}: ON")
 
         if self.config.data['settings']['notifications']:
