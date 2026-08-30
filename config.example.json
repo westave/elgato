@@ -16,8 +16,8 @@
     }
   ],
   "settings": {
-    "check_interval": 2.0,
-    "turn_on_delay": 0.5,
+    "check_interval": 0.5,
+    "turn_on_delay": 0.0,
     "turn_off_delay": 2.0,
     "auto_discovery": true,
     "notifications": true,
