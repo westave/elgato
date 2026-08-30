@@ -30,11 +30,13 @@ class ElgatoDevice:
         self.is_on = False
 
     def turn_on(self, brightness: Optional[int] = None, temperature: Optional[int] = None) -> bool:
-        """Включить свет с указанными параметрами"""
-        b = brightness if brightness is not None else self.brightness
-        t = temperature if temperature is not None else self.temperature
+        """Включить свет.
 
-        if self._set_state(True, b, t):
+        Без параметров отправляется только "on" — лампа сохраняет свои
+        последние яркость/температуру (например, выставленные из Home App
+        или Elgato Control Center).
+        """
+        if self._set_state(True, brightness, temperature):
             self.is_on = True
             return True
         return False
@@ -46,20 +48,21 @@ class ElgatoDevice:
             return True
         return False
 
-    def _set_state(self, on: bool, brightness: int = 100, temperature: int = 200) -> bool:
-        """Установить состояние света"""
+    def _set_state(self, on: bool, brightness: Optional[int] = None,
+                   temperature: Optional[int] = None) -> bool:
+        """Установить состояние света; None-параметры не отправляются"""
         if not self.enabled:
             return False
 
+        light: Dict[str, int] = {"on": 1 if on else 0}
+        if brightness is not None:
+            light["brightness"] = brightness
+        if temperature is not None:
+            light["temperature"] = temperature
+
         payload = {
             "numberOfLights": 1,
-            "lights": [
-                {
-                    "on": 1 if on else 0,
-                    "brightness": brightness,
-                    "temperature": temperature
-                }
-            ]
+            "lights": [light]
         }
 
         try:
@@ -138,15 +141,65 @@ class ElgatoDiscovery(ServiceListener):
 class CameraMonitor:
     """Мониторинг состояния камеры на macOS"""
 
+    # Бинарник собирается install.sh из Tools/camera-state.swift и опрашивает
+    # CoreMediaIO (kCMIODevicePropertyDeviceIsRunningSomewhere) — тот же
+    # сигнал, что и зелёный индикатор камеры. Работает на Intel и Apple
+    # Silicon, в отличие от эвристики по lsof.
+    HELPER_PATH = Path(__file__).resolve().parent / '.build' / 'camera-state'
+
     def __init__(self):
         self.last_state = False
         self.active_app = None
+
+        helper = self.HELPER_PATH
+        if helper.is_file() and os.access(helper, os.X_OK):
+            self.helper: Optional[str] = str(helper)
+            print("📷 Определение камеры: CoreMediaIO helper (надёжный режим)")
+        else:
+            self.helper = None
+            print("📷 Определение камеры: lsof (ненадёжно на новых macOS!)")
+            print("   Запустите ./install.sh чтобы собрать CoreMediaIO helper")
 
     def is_camera_active(self) -> Tuple[bool, Optional[str]]:
         """
         Проверить, активна ли камера и какое приложение её использует
         Возвращает (is_active, app_name)
         """
+        if self.helper:
+            state = self._check_via_helper()
+            if state is not None:
+                app_name = self._detect_app() if state else None
+                return state, app_name
+
+        return self._check_via_lsof()
+
+    def _check_via_helper(self) -> Optional[bool]:
+        """Проверка через CoreMediaIO helper. None = helper не сработал."""
+        try:
+            result = subprocess.run(
+                [self.helper],
+                capture_output=True,
+                timeout=5
+            )
+            if result.returncode == 0:
+                return True
+            if result.returncode == 1:
+                return False
+        except Exception as e:
+            print(f"⚠️  camera-state helper error: {e}")
+        return None
+
+    def _detect_app(self) -> Optional[str]:
+        """Определить приложение, использующее камеру (best-effort, через lsof)"""
+        # Пока камера остаётся активной, не пересканируем lsof каждый цикл
+        if self.last_state and self.active_app:
+            return self.active_app
+
+        _, app_name = self._check_via_lsof()
+        return app_name
+
+    def _check_via_lsof(self) -> Tuple[bool, Optional[str]]:
+        """Старый метод определения камеры по процессам (fallback)"""
         try:
             result = subprocess.run(
                 ['lsof', '-w'],
@@ -202,9 +255,9 @@ class CameraMonitor:
         current_state, app_name = self.is_camera_active()
         has_changed = current_state != self.last_state
 
+        self.active_app = app_name if current_state else None
         if has_changed:
             self.last_state = current_state
-            self.active_app = app_name
 
         return current_state, has_changed, app_name
 
@@ -379,16 +432,23 @@ class ElgatoCameraControl:
         return True
 
     def turn_lights_on(self, app_name: Optional[str]):
-        """Включить все светы с учетом профиля"""
-        profile = self.config.get_profile(app_name)
-
+        """Включить все светы (с профилем, если включено apply_profiles)"""
         app_str = f" ({app_name})" if app_name else ""
         print(f"💡 Включаю свет{app_str}...")
-        print(f"   Профиль: {profile['brightness']}% яркость, {profile['temperature']} температура")
+
+        # По умолчанию профили выключены: лампа включается с последними
+        # своими настройками яркости/температуры, не затирая их.
+        if self.config.data['settings'].get('apply_profiles', False):
+            profile = self.config.get_profile(app_name)
+            brightness, temperature = profile['brightness'], profile['temperature']
+            print(f"   Профиль: {brightness}% яркость, {temperature} температура")
+        else:
+            brightness = temperature = None
+            print("   Восстанавливаю последнее состояние лампы")
 
         for device in self.devices:
             if device.enabled:
-                device.turn_on(profile['brightness'], profile['temperature'])
+                device.turn_on(brightness, temperature)
                 print(f"   ✅ {device.name}: ON")
 
         if self.config.data['settings']['notifications']:
@@ -443,10 +503,18 @@ class ElgatoCameraControl:
             )
             self.turn_off_timer.start()
 
-    def run(self):
-        """Запустить мониторинг"""
-        if not self.setup():
-            return
+    def run(self, daemon: bool = False):
+        """Запустить мониторинг.
+
+        daemon=True (запуск из launchd): не завершаться, если устройства
+        ещё не найдены (сеть могла не подняться после логина/сна), а
+        повторять поиск каждые 30 секунд.
+        """
+        while not self.setup():
+            if not daemon:
+                return
+            print("⏳ Устройства не найдены, повторный поиск через 30с...")
+            time.sleep(30)
 
         print("\n🚀 Мониторинг камеры начат...")
         print("   (Нажмите Ctrl+C для выхода)\n")
@@ -499,6 +567,11 @@ def main():
         action='store_true',
         help='Create example config.json and exit'
     )
+    parser.add_argument(
+        '--daemon',
+        action='store_true',
+        help='Run as launchd daemon: retry discovery instead of exiting when no devices found'
+    )
 
     args = parser.parse_args()
 
@@ -540,7 +613,7 @@ def main():
 
     # Запустить приложение
     controller = ElgatoCameraControl(args.config)
-    controller.run()
+    controller.run(daemon=args.daemon)
 
 
 if __name__ == "__main__":

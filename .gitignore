@@ -1,6 +1,9 @@
 # Local configuration (don't commit personal IPs)
 config.json
 
+# HomeKit pairing state (contains pairing keys)
+.homekit.state
+
 # Xcode
 .DS_Store
 build/
@@ -55,3 +58,7 @@ Carthage/Build/
 Network Trash Folder
 Temporary Items
 .apdisk
+
+# Python
+__pycache__/
+*.pyc
