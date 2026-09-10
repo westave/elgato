@@ -1,0 +1,50 @@
+name: Build macOS app
+
+on:
+  push:
+    paths:
+      - 'Sources/**'
+      - 'Package.swift'
+      - 'Info.plist'
+      - 'Makefile'
+      - '.github/workflows/build-app.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build universal binary (arm64 + x86_64)
+        run: swift build -c release --arch arm64 --arch x86_64
+
+      - name: Assemble .app bundle
+        run: make bundle BUILD_DIR=.build/apple/Products/Release
+
+      - name: Zip app
+        run: ditto -c -k --keepParent build/ElgatoCameraControl.app ElgatoCameraControl.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ElgatoCameraControl
+          path: ElgatoCameraControl.zip
+
+      - name: Publish "latest" release (default branch only)
+        if: github.ref_name == github.event.repository.default_branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat > release-notes.md <<'EOF'
+          Автоматическая сборка из последнего коммита (universal: Apple Silicon + Intel).
+
+          **Установка:** скачайте `ElgatoCameraControl.zip`, распакуйте, перетащите приложение в «Программы» и запустите. При первом запуске macOS предупредит о неизвестном разработчике — откройте Системные настройки → Конфиденциальность и безопасность и нажмите «Всё равно открыть».
+          EOF
+          gh release delete app-latest --cleanup-tag --yes || true
+          gh release create app-latest ElgatoCameraControl.zip \
+            --title "Elgato Camera Control.app" \
+            --notes-file release-notes.md

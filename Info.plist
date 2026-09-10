@@ -4,19 +4,21 @@
 <dict>
     <key>CFBundleName</key>
     <string>Elgato Camera Control</string>
+    <key>CFBundleDisplayName</key>
+    <string>Elgato Camera Control</string>
+    <key>CFBundleExecutable</key>
+    <string>ElgatoCameraControl</string>
     <key>CFBundleIdentifier</key>
-    <string>com.elgato.cameracontrol</string>
+    <string>dev.westave.elgato-camera-control</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
     <key>CFBundleVersion</key>
-    <string>1.0</string>
+    <string>2.0</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0</string>
+    <string>2.0</string>
     <key>LSMinimumSystemVersion</key>
     <string>13.0</string>
     <key>LSUIElement</key>
     <true/>
-    <key>NSCameraUsageDescription</key>
-    <string>This app monitors camera usage to automatically control your Elgato Key Light.</string>
-    <key>NSAppleEventsUsageDescription</key>
-    <string>This app needs to monitor system events to detect camera usage.</string>
 </dict>
 </plist>

@@ -1,103 +1,76 @@
 import Foundation
 
-class ElgatoController {
-    let ipAddress: String
-    let port: Int = 9123
+/// Один Elgato Key Light: управление через HTTP API (порт 9123).
+/// Перед выключением запоминает яркость/температуру и восстанавливает
+/// ровно их при следующем включении.
+final class KeyLight {
+    let name: String
+    let ip: String
 
-    init(ipAddress: String) {
-        self.ipAddress = ipAddress
+    private let session: URLSession
+    private var lastBrightness: Int?
+    private var lastTemperature: Int?
+
+    private var url: URL { URL(string: "http://\(ip):9123/elgato/lights")! }
+
+    init(name: String, ip: String) {
+        self.name = name
+        self.ip = ip
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 3
+        session = URLSession(configuration: config)
     }
 
     func turnOn() {
-        setLightState(on: true)
+        var fields: [String: Int] = ["on": 1]
+        if let brightness = lastBrightness { fields["brightness"] = brightness }
+        if let temperature = lastTemperature { fields["temperature"] = temperature }
+        put(fields)
     }
 
     func turnOff() {
-        setLightState(on: false)
+        fetchState { [weak self] state in
+            guard let self else { return }
+            if let state {
+                if let brightness = state["brightness"] as? Int { self.lastBrightness = brightness }
+                if let temperature = state["temperature"] as? Int { self.lastTemperature = temperature }
+            }
+            self.put(["on": 0])
+        }
     }
 
-    private func setLightState(on: Bool) {
-        let urlString = "http://\(ipAddress):\(port)/elgato/lights"
-        guard let url = URL(string: urlString) else {
-            print("Invalid URL: \(urlString)")
-            return
-        }
+    func setOn(_ on: Bool) {
+        put(["on": on ? 1 : 0])
+    }
 
+    func setBrightness(_ value: Int) {
+        put(["brightness": max(3, min(100, value))])
+    }
+
+    func setTemperature(_ value: Int) {
+        put(["temperature": max(143, min(344, value))])
+    }
+
+    func fetchState(_ completion: @escaping ([String: Any]?) -> Void) {
+        session.dataTask(with: url) { data, _, _ in
+            guard let data,
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let lights = json["lights"] as? [[String: Any]],
+                  let first = lights.first else {
+                completion(nil)
+                return
+            }
+            completion(first)
+        }.resume()
+    }
+
+    private func put(_ fields: [String: Int]) {
         var request = URLRequest(url: url)
         request.httpMethod = "PUT"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-
-        let payload: [String: Any] = [
-            "numberOfLights": 1,
-            "lights": [
-                [
-                    "on": on ? 1 : 0,
-                    "brightness": 100,
-                    "temperature": 200
-                ]
-            ]
-        ]
-
-        do {
-            request.httpBody = try JSONSerialization.data(withJSONObject: payload)
-        } catch {
-            print("Failed to serialize JSON: \(error)")
-            return
-        }
-
-        let task = URLSession.shared.dataTask(with: request) { data, response, error in
-            if let error = error {
-                print("Error controlling Key Light: \(error.localizedDescription)")
-                return
-            }
-
-            if let httpResponse = response as? HTTPURLResponse {
-                if httpResponse.statusCode == 200 {
-                    print("Key Light turned \(on ? "ON" : "OFF") successfully")
-                } else {
-                    print("Key Light responded with status code: \(httpResponse.statusCode)")
-                }
-            }
-        }
-
-        task.resume()
-    }
-
-    func getStatus(completion: @escaping (Bool?) -> Void) {
-        let urlString = "http://\(ipAddress):\(port)/elgato/lights"
-        guard let url = URL(string: urlString) else {
-            print("Invalid URL: \(urlString)")
-            completion(nil)
-            return
-        }
-
-        let task = URLSession.shared.dataTask(with: url) { data, response, error in
-            if let error = error {
-                print("Error getting Key Light status: \(error.localizedDescription)")
-                completion(nil)
-                return
-            }
-
-            guard let data = data else {
-                completion(nil)
-                return
-            }
-
-            do {
-                if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                   let lights = json["lights"] as? [[String: Any]],
-                   let firstLight = lights.first,
-                   let on = firstLight["on"] as? Int {
-                    completion(on == 1)
-                } else {
-                    completion(nil)
-                }
-            } catch {
-                print("Error parsing response: \(error)")
-                completion(nil)
-            }
-        }
-
-        task.resume()
+        request.httpBody = try? JSONSerialization.data(
+            withJSONObject: ["numberOfLights": 1, "lights": [fields]]
+        )
+        session.dataTask(with: request).resume()
     }
 }
