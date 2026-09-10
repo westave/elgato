@@ -1,4 +1,6 @@
-.PHONY: build run clean install help
+.PHONY: build run clean install help app bundle
+
+APP_BUNDLE = build/ElgatoCameraControl.app
 
 # Build configuration
 BUILD_DIR = .build/release
@@ -39,6 +41,20 @@ install: build
 	@echo ""
 	@echo "To run: $(APP_NAME)"
 	@echo "To add to Login Items: System Settings → General → Login Items"
+
+# Собрать .app bundle из уже скомпилированного бинарника.
+# BUILD_DIR можно переопределить (например, для universal-сборки в CI).
+bundle:
+	@echo "Assembling $(APP_BUNDLE)..."
+	rm -rf $(APP_BUNDLE)
+	mkdir -p $(APP_BUNDLE)/Contents/MacOS
+	cp $(BUILD_DIR)/$(APP_NAME) $(APP_BUNDLE)/Contents/MacOS/$(APP_NAME)
+	cp Info.plist $(APP_BUNDLE)/Contents/Info.plist
+	printf 'APPL????' > $(APP_BUNDLE)/Contents/PkgInfo
+	codesign --force -s - $(APP_BUNDLE)
+	@echo "✅ $(APP_BUNDLE)"
+
+app: build bundle
 
 uninstall:
 	@echo "Uninstalling $(APP_NAME)..."
