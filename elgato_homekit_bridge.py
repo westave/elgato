@@ -11,10 +11,12 @@ Elgato Key Light → HomeKit Bridge
          отсканировать" → Elgato Bridge → код 031-45-154
 """
 
+import argparse
 import asyncio
 import json
 import os
 import signal
+import socket
 import sys
 import time
 from pathlib import Path
@@ -31,7 +33,6 @@ from elgato_camera_control_advanced import Config, ElgatoDiscovery  # noqa: E402
 
 PINCODE = b"031-45-154"
 HAP_PORT = 51826
-STATE_FILE = SCRIPT_DIR / ".homekit.state"
 
 # Elgato использует миреды (144–344 ≈ 7000K–2900K), HomeKit тоже миреды —
 # конвертация не нужна, только ограничение диапазона.
@@ -45,8 +46,8 @@ class KeyLightAccessory(Accessory):
 
     category = CATEGORY_LIGHTBULB
 
-    def __init__(self, driver, name: str, ip: str):
-        super().__init__(driver, name)
+    def __init__(self, driver, name: str, ip: str, aid=None):
+        super().__init__(driver, name, aid=aid)
         self.ip = ip
         self.url = f"http://{ip}:9123/elgato/lights"
 
@@ -73,7 +74,7 @@ class KeyLightAccessory(Accessory):
     def _put(self, fields: dict) -> None:
         payload = {"numberOfLights": 1, "lights": [fields]}
         try:
-            requests.put(self.url, json=payload, timeout=2)
+            requests.put(self.url, json=payload, timeout=2).raise_for_status()
         except requests.exceptions.RequestException as e:
             print(f"⚠️  {self.display_name}: не удалось отправить команду: {e}")
 
@@ -89,18 +90,20 @@ class KeyLightAccessory(Accessory):
 
     # --- лампа → HomeKit -------------------------------------------------
 
-    @Accessory.run_at_interval(3)
-    async def run(self):
-        """Опрос лампы, чтобы Home App показывал актуальное состояние"""
+    def _read_state(self):
         try:
             response = requests.get(self.url, timeout=2)
-            if response.status_code != 200:
-                return
+            response.raise_for_status()
             lights = response.json().get("lights") or []
-            if not lights:
-                return
-            state = lights[0]
+            return lights[0] if lights else None
         except (requests.exceptions.RequestException, ValueError):
+            return None
+
+    @Accessory.run_at_interval(3)
+    async def run(self):
+        """Сетевой опрос не должен задерживать сопряжение HomeKit."""
+        state = await asyncio.to_thread(self._read_state)
+        if not state:
             return
 
         if "on" in state:
@@ -138,7 +141,37 @@ def wait_for_lights(config: Config) -> list:
             time.sleep(30)
 
 
-def run_driver(driver: AccessoryDriver) -> None:
+def accessory_ids(data_dir: Path, lights: list) -> dict:
+    """Сохранять AID при добавлении, удалении и перестановке ламп."""
+    path = data_dir / "accessory_ids.json"
+    ids = json.loads(path.read_text()) if path.exists() else {}
+    next_id = max([1, *ids.values()]) + 1
+    for light in lights:
+        ip = light["ip"]
+        if ip not in ids:
+            if next_id == 7:  # HAP-python также пропускает этот AID.
+                next_id += 1
+            ids[ip] = next_id
+            next_id += 1
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(ids))
+    temporary.replace(path)
+    return ids
+
+
+def lan_address(lights: list):
+    """Объявлять адрес сети лампы, даже если маршрут в интернет идёт через VPN."""
+    for light in lights:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                sock.connect((light["ip"], 9123))
+                return sock.getsockname()[0]
+        except OSError:
+            continue
+    return None
+
+
+def run_driver(driver: AccessoryDriver, ready_file=None, parent_pid=None) -> None:
     """Запуск event loop без driver.start().
 
     driver.start() в HAP-python (вплоть до 5.0.0) вызывает
@@ -147,47 +180,95 @@ def run_driver(driver: AccessoryDriver) -> None:
     child watcher (дочерние процессы мост не запускает).
     """
     loop = driver.loop
+    startup_errors = []
+
+    async def start():
+        try:
+            await driver.async_start()
+            if ready_file:
+                ready_file.write_text(json.dumps({"port": driver.state.port}))
+        except Exception as exc:
+            startup_errors.append(exc)
+            print(f"❌ Не удалось запустить HomeKit: {exc}", file=sys.stderr, flush=True)
+            loop.stop()
+
+    async def watch_parent():
+        while True:
+            await asyncio.sleep(2)
+            try:
+                os.kill(parent_pid, 0)
+            except ProcessLookupError:
+                driver.stop()
+                return
+            except PermissionError:
+                pass
+
     try:
-        driver.add_job(driver.async_start())
+        loop.create_task(start())
+        if parent_pid:
+            loop.create_task(watch_parent())
         loop.run_forever()
     except KeyboardInterrupt:
         loop.call_soon_threadsafe(loop.create_task, driver.async_stop())
         loop.run_forever()
     finally:
+        pending = asyncio.all_tasks(loop)
+        for task in pending:
+            task.cancel()
+        if pending:
+            loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+        loop.run_until_complete(loop.shutdown_asyncgens())
+        loop.run_until_complete(loop.shutdown_default_executor())
         loop.close()
+        if ready_file:
+            ready_file.unlink(missing_ok=True)
+    if startup_errors:
+        raise SystemExit(1)
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Elgato Key Light HomeKit bridge")
+    parser.add_argument("--data-dir", type=Path, default=SCRIPT_DIR)
+    parser.add_argument("--port", type=int, default=HAP_PORT)
+    parser.add_argument("--parent-pid", type=int)
+    parser.add_argument("--name", default="Elgato Bridge")
+    args = parser.parse_args()
+    args.data_dir.mkdir(parents=True, exist_ok=True)
+    ready_file = args.data_dir / ".homekit.ready.json"
+    ready_file.unlink(missing_ok=True)
+
     print("🏠 Elgato Key Light → HomeKit Bridge")
     print("=" * 60)
 
-    config = Config(str(SCRIPT_DIR / "config.json"))
+    config = Config(str(args.data_dir / "config.json"))
     lights = wait_for_lights(config)
+    ids = accessory_ids(args.data_dir, lights)
 
     driver = AccessoryDriver(
-        port=HAP_PORT,
-        persist_file=str(STATE_FILE),
+        address=lan_address(lights),
+        port=args.port,
+        persist_file=str(args.data_dir / ".homekit.state"),
         pincode=PINCODE,
     )
 
-    bridge = Bridge(driver, "Elgato Bridge")
+    bridge = Bridge(driver, args.name)
     for light in lights:
         name = light.get("name", f"Key Light {light['ip']}")
         print(f"💡 Добавляю в мост: {name} ({light['ip']})")
-        bridge.add_accessory(KeyLightAccessory(driver, name, light["ip"]))
+        bridge.add_accessory(KeyLightAccessory(driver, name, light["ip"], aid=ids[light["ip"]]))
 
     driver.add_accessory(accessory=bridge)
     signal.signal(signal.SIGTERM, driver.signal_handler)
 
     print()
-    print("✅ Мост запущен. Добавление в Home App:")
+    print("Добавление в Home App после запуска моста:")
     print('   1. Home App → "+" → Добавить аксессуар')
     print('   2. "Нет кода или не удаётся отсканировать"')
     print('   3. Выберите "Elgato Bridge"')
     print(f"   4. Код: {PINCODE.decode()}")
     print()
 
-    run_driver(driver)
+    run_driver(driver, ready_file=ready_file, parent_pid=args.parent_pid)
 
 
 if __name__ == "__main__":

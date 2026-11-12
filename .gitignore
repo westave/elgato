@@ -3,6 +3,8 @@ config.json
 
 # HomeKit pairing state (contains pairing keys)
 .homekit.state
+.homekit.ready.json
+accessory_ids.json
 
 # Xcode
 .DS_Store
@@ -60,5 +62,9 @@ Temporary Items
 .apdisk
 
 # Python
+.venv/
 __pycache__/
 *.pyc
+
+# Local Homebridge test configuration and pairing keys
+.homebridge-test/
