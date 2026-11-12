@@ -11,7 +11,16 @@ if [[ ! -x "$ENV_DIR/bin/python" ]]; then
     "$BUILD_PYTHON" -m venv "$ENV_DIR"
 fi
 # Compile orjson for the deployment target; prebuilt wheels may require a newer macOS.
-MACOSX_DEPLOYMENT_TARGET=13.0 "$ENV_DIR/bin/python" -m pip install --quiet --no-binary=orjson -r requirements-build.txt
+# Source builds of cryptography (e.g. Intel) must not share Python's libssl filename.
+OPENSSL_STATIC=1 MACOSX_DEPLOYMENT_TARGET=13.0 "$ENV_DIR/bin/python" -m pip install --quiet --no-binary=orjson -r requirements-build.txt
+"$ENV_DIR/bin/python" - <<'PY'
+import subprocess
+from cryptography.hazmat.bindings import _rust
+
+dependencies = subprocess.check_output(["otool", "-L", _rust.__file__], text=True)
+if "libssl." in dependencies or "libcrypto." in dependencies:
+    raise SystemExit("cryptography must use static OpenSSL. Recreate .build/homekit-venv and rebuild.")
+PY
 MACOSX_DEPLOYMENT_TARGET=13.0 "$ENV_DIR/bin/python" -m PyInstaller \
     --noconfirm --clean --onefile --name ElgatoHomeKitBridge \
     --target-arch "$TARGET_ARCH" --python-option u \
