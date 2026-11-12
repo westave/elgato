@@ -35,7 +35,7 @@ final class LampDiscovery: NSObject, NetServiceBrowserDelegate, NetServiceDelega
 
     // MARK: - NetServiceDelegate
 
-    func netServiceDidResolve(_ sender: NetService) {
+    func netServiceDidResolveAddress(_ sender: NetService) {
         defer { pending.remove(sender) }
         guard let ip = Self.ipv4Address(from: sender.addresses) else { return }
         onFound?(sender.name, ip)

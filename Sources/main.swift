@@ -14,6 +14,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var lamps: [String: KeyLight] = [:]          // ip -> лампа
     private var lampViews: [String: LampControlView] = [:]
     private let discovery = LampDiscovery()
+    private let homeKit = HomeKitBridge()
 
     private var pollTimer: Timer?
     private var cameraActive = false
@@ -22,6 +23,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let defaults = UserDefaults.standard
     private static let lampsKey = "knownLamps"           // [ip: имя]
     private static let loginItemKey = "didAutoEnableLoginItem"
+    private static let homeKitKey = "homeKitEnabled"
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
@@ -36,6 +38,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 lamps[ip] = KeyLight(name: name, ip: ip)
             }
         }
+        if lamps.isEmpty {
+            for (ip, name) in homeKit.savedLamps { lamps[ip] = KeyLight(name: name, ip: ip) }
+        }
+        homeKit.onStatusChanged = { [weak self] in self?.rebuildMenu() }
+        if defaults.object(forKey: Self.homeKitKey) == nil {
+            // Preserve an existing pairing; fresh installations opt in explicitly.
+            defaults.set(homeKit.hasExistingSetup, forKey: Self.homeKitKey)
+        }
+        homeKit.setEnabled(defaults.bool(forKey: Self.homeKitKey))
+        syncHomeKit()
 
         discovery.onFound = { [weak self] name, ip in
             DispatchQueue.main.async { self?.addLamp(name: name, ip: ip) }
@@ -56,6 +68,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         rebuildMenu()
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        homeKit.stop()
     }
 
     // MARK: - Камера → свет
@@ -104,6 +120,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         var saved: [String: String] = [:]
         for (ip, lamp) in lamps { saved[ip] = lamp.name }
         defaults.set(saved, forKey: Self.lampsKey)
+        syncHomeKit()
+    }
+
+    private func syncHomeKit() {
+        homeKit.updateLamps(lamps.mapValues { $0.name })
     }
 
     // MARK: - Меню
@@ -155,6 +176,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         menu.addItem(.separator())
 
+        let homeKitStatus = NSMenuItem(title: homeKit.statusTitle, action: nil, keyEquivalent: "")
+        homeKitStatus.isEnabled = false
+        menu.addItem(homeKitStatus)
+        let homeKitToggle = makeItem("Подключать лампы к Apple Home", #selector(toggleHomeKit))
+        homeKitToggle.state = homeKit.enabled ? .on : .off
+        menu.addItem(homeKitToggle)
+        if homeKit.enabled {
+            menu.addItem(makeItem("Добавить в Apple Home…", #selector(showHomeKit)))
+            menu.addItem(makeItem("Перезапустить HomeKit", #selector(restartHomeKit)))
+        }
+        menu.addItem(.separator())
+
         let login = makeItem("Запускать при входе", #selector(toggleLoginItem))
         login.state = SMAppService.mainApp.status == .enabled ? .on : .off
         menu.addItem(login)
@@ -185,6 +218,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         lamps.removeAll()
         lampViews.removeAll()
         defaults.removeObject(forKey: Self.lampsKey)
+        syncHomeKit()
         rebuildMenu()
         discovery.start()
     }
@@ -219,6 +253,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         } catch {
             NSLog("Login item error: \(error)")
         }
+    }
+
+    @objc private func showHomeKit() {
+        let alert = NSAlert()
+        alert.messageText = "Добавить лампу в Apple Home"
+        if let error = homeKit.lastError {
+            alert.informativeText = error
+            alert.addButton(withTitle: "Закрыть")
+            alert.addButton(withTitle: "Открыть журнал")
+        } else {
+            alert.informativeText = "\(homeKit.statusTitle)\n\nНа iPhone или iPad в той же сети откройте «Дом» → «+» → «Добавить аксессуар» → «Другие варианты» и выберите Elgato Bridge.\n\nКод: \(HomeKitBridge.pairingCode)\n\nДля другой квартиры можно создать отдельный «Дом» в том же Apple Account. Mac должен оставаться включённым."
+            alert.addButton(withTitle: "Закрыть")
+            alert.addButton(withTitle: "Скопировать код")
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        if alert.runModal() == .alertSecondButtonReturn {
+            if homeKit.lastError != nil { homeKit.openLog() }
+            else {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(HomeKitBridge.pairingCode, forType: .string)
+            }
+        }
+    }
+
+    @objc private func restartHomeKit() { homeKit.restart() }
+
+    @objc private func toggleHomeKit() {
+        let enabled = !homeKit.enabled
+        defaults.set(enabled, forKey: Self.homeKitKey)
+        homeKit.setEnabled(enabled)
+        syncHomeKit()
+        rebuildMenu()
     }
 }
 

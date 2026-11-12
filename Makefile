@@ -1,4 +1,4 @@
-.PHONY: build run clean install help app bundle
+.PHONY: build run clean install help app bundle homekit
 
 APP_BUNDLE = build/ElgatoCameraControl.app
 
@@ -6,12 +6,14 @@ APP_BUNDLE = build/ElgatoCameraControl.app
 BUILD_DIR = .build/release
 APP_NAME = ElgatoCameraControl
 INSTALL_DIR = /usr/local/bin
+HOMEKIT_HELPERS = $(wildcard .build/homekit-dist/ElgatoHomeKitBridge*)
 
 help:
 	@echo "Elgato Camera Control - Makefile"
 	@echo ""
 	@echo "Available commands:"
 	@echo "  make build    - Build the application in release mode"
+	@echo "  make app      - Build a complete .app including HomeKit and Python"
 	@echo "  make run      - Build and run the application"
 	@echo "  make clean    - Clean build artifacts"
 	@echo "  make install  - Install to $(INSTALL_DIR)"
@@ -44,17 +46,24 @@ install: build
 
 # Собрать .app bundle из уже скомпилированного бинарника.
 # BUILD_DIR можно переопределить (например, для universal-сборки в CI).
+homekit:
+	bash Tools/build-homekit.sh
+
 bundle:
 	@echo "Assembling $(APP_BUNDLE)..."
+	test -n "$(HOMEKIT_HELPERS)"
 	rm -rf $(APP_BUNDLE)
-	mkdir -p $(APP_BUNDLE)/Contents/MacOS
+	mkdir -p $(APP_BUNDLE)/Contents/MacOS $(APP_BUNDLE)/Contents/Helpers
 	cp $(BUILD_DIR)/$(APP_NAME) $(APP_BUNDLE)/Contents/MacOS/$(APP_NAME)
+	cp $(HOMEKIT_HELPERS) $(APP_BUNDLE)/Contents/Helpers/
 	cp Info.plist $(APP_BUNDLE)/Contents/Info.plist
 	printf 'APPL????' > $(APP_BUNDLE)/Contents/PkgInfo
+	xattr -cr $(APP_BUNDLE)
 	codesign --force -s - $(APP_BUNDLE)
 	@echo "✅ $(APP_BUNDLE)"
 
-app: build bundle
+app: build homekit
+	$(MAKE) bundle
 
 uninstall:
 	@echo "Uninstalling $(APP_NAME)..."
